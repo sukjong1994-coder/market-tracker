@@ -18,7 +18,7 @@ FAST_TIMEOUT = 2.5  # 초 단위 — 느린 소스는 빨리 포기하고 다음
 # =========================================================
 # 🌐 단일 소스 fetch 함수 (재시도 없음 - 빠른 실패가 목적)
 # =========================================================
-def fetch_yahoo(ticker, debug=None):
+def fetch_yahoo(ticker, debug=None, scale=1.0):
     try:
         r = SESSION.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
@@ -39,7 +39,9 @@ def fetch_yahoo(ticker, debug=None):
             if debug is not None:
                 debug["error"] = "regularMarketPrice 없음"
             return None
-        return {"value": price, "change": (price - prev) if prev is not None else None}
+        price *= scale
+        change = (price - prev * scale) if prev is not None else None
+        return {"value": price, "change": change}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -142,6 +144,13 @@ def fetch_us2y(debug_bucket):
     ])
 
 
+def fetch_us10y(debug_bucket):
+    return try_chain(debug_bucket, [
+        ("Yahoo(^TNX)", lambda d: fetch_yahoo("^TNX", debug=d, scale=0.1)),
+        ("Stooq", lambda d: fetch_stooq("10usy.b", debug=d)),
+    ])
+
+
 # =========================================================
 # 🔄 캐시된 병렬 로더
 #   - ttl=15초: 이 시간 안에는 재실행돼도 네트워크 재요청 없이 즉시 반환
@@ -175,6 +184,7 @@ def load_market_data():
     bond_specs = {
         "한국 국채 3년": fetch_kr3y,
         "미국 국채 2년": fetch_us2y,
+        "미국 국채 10년": fetch_us10y,
     }
     for key, fn in bond_specs.items():
         d = {}
@@ -233,9 +243,10 @@ def show_metric(col, label, v, fmt, unit=""):
 
 st.write("---")
 st.subheader("🏦 한·미 핵심 국채 금리 현황")
-b1, b2 = st.columns(2)
+b1, b2, b3 = st.columns(3)
 show_metric(b1, "🇰🇷 한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %")
 show_metric(b2, "🇺🇸 미국 국채 2년물", data["미국 국채 2년"], ",.4f", " %")
+show_metric(b3, "🇺🇸 미국 국채 10년물", data["미국 국채 10년"], ",.4f", " %")
 
 st.write("---")
 st.subheader("📊 국내 및 해외 주요 주가지수")
