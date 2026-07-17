@@ -144,7 +144,6 @@ def fetch_us2y(debug_bucket):
 
 
 def fetch_us10y(debug_bucket):
-    # ✅ 수정: ^TNX는 이미 실제 % 값(예: 4.535)을 반환하므로 스케일 보정 불필요
     return try_chain(debug_bucket, [
         ("Yahoo", lambda d: fetch_yahoo("^TNX", debug=d, scale=1.0)),
         ("Stooq", lambda d: fetch_stooq("10usy.b", debug=d)),
@@ -278,6 +277,12 @@ st.markdown("""
         color: #F59E0B;
         font-weight: 600;
     }
+    .section-title {
+        font-size: 18px;
+        font-weight: 700;
+        margin-top: 4px;
+        margin-bottom: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -348,37 +353,46 @@ def render_jpy_card(col, v):
 
 
 # =========================================================
-# 🗂️ 탭 구성
+# 📄 한 페이지에 모든 섹션 표시
 # =========================================================
-tab1, tab2, tab3, tab4 = st.tabs(["🏦 국채금리", "📊 주가지수", "💵 환율", "🔥 원자재/공포지수"])
 
-with tab1:
-    b1, b2, b3 = st.columns(3)
-    render_card(b1, "한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %", "🇰🇷")
-    render_card(b2, "미국 국채 2년물", data["미국 국채 2년"], ",.3f", " %", "🇺🇸")
-    render_card(b3, "미국 국채 10년물", data["미국 국채 10년"], ",.3f", " %", "🇺🇸")
+# --- 국채금리 ---
+st.markdown('<div class="section-title">🏦 한·미 핵심 국채 금리 현황</div>', unsafe_allow_html=True)
+b1, b2, b3 = st.columns(3)
+render_card(b1, "한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %", "🇰🇷")
+render_card(b2, "미국 국채 2년물", data["미국 국채 2년"], ",.3f", " %", "🇺🇸")
+render_card(b3, "미국 국채 10년물", data["미국 국채 10년"], ",.3f", " %", "🇺🇸")
 
-with tab2:
-    c1, c2, c3, c4, c5 = st.columns(5)
-    render_card(c1, "코스피", data["KOSPI"], ",.2f", "", "🇰🇷")
-    render_card(c2, "코스닥", data["KOSDAQ"], ",.2f", "", "🇰🇷")
-    render_card(c3, "S&P 500", data["S&P 500"], ",.2f", "", "🇺🇸")
-    render_card(c4, "나스닥", data["NASDAQ"], ",.2f", "", "🇺🇸")
-    render_card(c5, "필라델피아 반도체", data["필라델피아 반도체"], ",.2f", "", "💻")
+st.write("---")
 
-with tab3:
-    h1, h2, h3, h4, h5 = st.columns(5)
-    render_card(h1, "원/달러 환율", data["원달러 환율"], ",.2f", " 원", "💵")
-    render_jpy_card(h2, data["엔화 환율"])
-    render_card(h3, "원/유로 환율", data["유로 환율"], ",.2f", " 원", "💶")
-    render_card(h4, "원/위안화 환율", data["위안화 환율"], ",.2f", " 원", "💴")
-    render_card(h5, "달러 인덱스", data["달러 인덱스"], ",.2f", "", "📈")
+# --- 주가지수 ---
+st.markdown('<div class="section-title">📊 국내 및 해외 주요 주가지수</div>', unsafe_allow_html=True)
+c1, c2, c3, c4, c5 = st.columns(5)
+render_card(c1, "코스피", data["KOSPI"], ",.2f", "", "🇰🇷")
+render_card(c2, "코스닥", data["KOSDAQ"], ",.2f", "", "🇰🇷")
+render_card(c3, "S&P 500", data["S&P 500"], ",.2f", "", "🇺🇸")
+render_card(c4, "나스닥", data["NASDAQ"], ",.2f", "", "🇺🇸")
+render_card(c5, "필라델피아 반도체", data["필라델피아 반도체"], ",.2f", "", "💻")
 
-with tab4:
-    e1, e2, e3 = st.columns(3)
-    render_card(e1, "WTI 국제유가", data["유가 (WTI)"], ",.2f", " $", "🛢️")
-    render_card(e2, "국제 금 시세", data["국제 금"], ",.2f", " $", "🥇")
-    render_card(e3, "VIX 공포지수", data["VIX 공포지수"], ",.2f", "", "😨")
+st.write("---")
+
+# --- 환율 ---
+st.markdown('<div class="section-title">💵 주요 환율 및 달러 인덱스</div>', unsafe_allow_html=True)
+h1, h2, h3, h4, h5 = st.columns(5)
+render_card(h1, "원/달러 환율", data["원달러 환율"], ",.2f", " 원", "💵")
+render_jpy_card(h2, data["엔화 환율"])
+render_card(h3, "원/유로 환율", data["유로 환율"], ",.2f", " 원", "💶")
+render_card(h4, "원/위안화 환율", data["위안화 환율"], ",.2f", " 원", "💴")
+render_card(h5, "달러 인덱스", data["달러 인덱스"], ",.2f", "", "📈")
+
+st.write("---")
+
+# --- 원자재/공포지수 ---
+st.markdown('<div class="section-title">🔥 주요 원자재 및 공포지수</div>', unsafe_allow_html=True)
+e1, e2, e3 = st.columns(3)
+render_card(e1, "WTI 국제유가", data["유가 (WTI)"], ",.2f", " $", "🛢️")
+render_card(e2, "국제 금 시세", data["국제 금"], ",.2f", " $", "🥇")
+render_card(e3, "VIX 공포지수", data["VIX 공포지수"], ",.2f", "", "😨")
 
 st.write("---")
 with st.expander("🔧 진단 정보 (N/A 원인 확인용)"):
