@@ -12,11 +12,11 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-FAST_TIMEOUT = 2.5  # 초 단위 — 느린 소스는 빨리 포기하고 다음으로 넘어감
+FAST_TIMEOUT = 2.5
 
 
 # =========================================================
-# 🌐 단일 소스 fetch 함수 (재시도 없음 - 빠른 실패가 목적)
+# 🌐 단일 소스 fetch 함수
 # =========================================================
 def fetch_yahoo(ticker, debug=None, scale=1.0):
     try:
@@ -115,7 +115,6 @@ def fetch_korea_bond(marketindex_cd, debug=None):
 
 
 def try_chain(debug_bucket, attempts):
-    """최대 2단계 이내로만 구성 - 길게 물리지 않도록"""
     debug_bucket["attempts"] = {}
     for name, fn in attempts:
         d = {}
@@ -140,20 +139,20 @@ def fetch_kr3y(debug_bucket):
 def fetch_us2y(debug_bucket):
     return try_chain(debug_bucket, [
         ("Stooq", lambda d: fetch_stooq("2usy.b", debug=d)),
-        ("Yahoo(2YY=F)", lambda d: fetch_yahoo("2YY=F", debug=d)),
+        ("Yahoo", lambda d: fetch_yahoo("2YY=F", debug=d)),
     ])
 
 
 def fetch_us10y(debug_bucket):
+    # ✅ 수정: ^TNX는 이미 실제 % 값(예: 4.535)을 반환하므로 스케일 보정 불필요
     return try_chain(debug_bucket, [
-        ("Yahoo(^TNX)", lambda d: fetch_yahoo("^TNX", debug=d, scale=0.1)),
+        ("Yahoo", lambda d: fetch_yahoo("^TNX", debug=d, scale=1.0)),
         ("Stooq", lambda d: fetch_stooq("10usy.b", debug=d)),
     ])
 
 
 # =========================================================
 # 🔄 캐시된 병렬 로더
-#   - ttl=15초: 이 시간 안에는 재실행돼도 네트워크 재요청 없이 즉시 반환
 # =========================================================
 @st.cache_data(ttl=15, show_spinner=False)
 def load_market_data():
@@ -219,72 +218,169 @@ def load_market_data():
 
 
 # =========================================================
-# 🖥️ Streamlit 화면 구성
+# 🎨 UI 스타일 (카드형 디자인)
 # =========================================================
-st.set_page_config(page_title="실시간 글로벌 대시보드", page_icon="📈", layout="wide")
-st.title("📈 글로벌 시장 지표 실시간 트래커")
-st.write(f"조회 시각 (KST): `{dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}`")
+st.set_page_config(page_title="글로벌 시장 대시보드", page_icon="📈", layout="wide")
 
-if st.button("🔄 실시간 지표 새로고침 (캐시 무시하고 강제 갱신)"):
-    load_market_data.clear()
+st.markdown("""
+<style>
+    .metric-card {
+        border: 1px solid #E5E7EB;
+        border-radius: 12px;
+        padding: 16px 18px;
+        background-color: #FFFFFF;
+        margin-bottom: 10px;
+        transition: box-shadow 0.2s;
+    }
+    .metric-card:hover {
+        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    }
+    .metric-label {
+        font-size: 13px;
+        color: #6B7280;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 4px;
+    }
+    .metric-badge {
+        font-size: 10px;
+        background-color: #F3F4F6;
+        color: #9CA3AF;
+        padding: 1px 6px;
+        border-radius: 6px;
+        font-weight: 500;
+    }
+    .metric-value {
+        font-size: 26px;
+        font-weight: 700;
+        color: #111827;
+        line-height: 1.3;
+    }
+    .metric-delta-up {
+        font-size: 14px;
+        font-weight: 600;
+        color: #DC2626;
+    }
+    .metric-delta-down {
+        font-size: 14px;
+        font-weight: 600;
+        color: #2563EB;
+    }
+    .metric-delta-flat {
+        font-size: 14px;
+        font-weight: 600;
+        color: #9CA3AF;
+    }
+    .stale-tag {
+        font-size: 11px;
+        color: #F59E0B;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("📈 글로벌 시장 지표 대시보드")
+
+top_l, top_r = st.columns([3, 1])
+with top_l:
+    st.caption(f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  🔴 상승 / 🔵 하락 (한국 시장 관행 기준)")
+with top_r:
+    if st.button("🔄 강제 새로고침", use_container_width=True):
+        load_market_data.clear()
 
 with st.spinner("⚡ 지표 동기화 중..."):
     data, debug_log = load_market_data()
 
 
-def show_metric(col, label, v, fmt, unit=""):
+# =========================================================
+# 🧩 카드 렌더링 함수
+# =========================================================
+def render_card(col, label, v, fmt, unit="", icon="📌"):
     with col:
-        val_str = f"{v['value']:{fmt}}{unit}" if v.get("value") is not None else "N/A"
-        delta_str = f"{v['change']:+{fmt}}{unit}" if v.get("change") is not None else None
-        tag = f" [{v['source']}]" if v.get("source") else ""
-        display_label = f"{label}{tag} ⚠️" if v.get("stale") else f"{label}{tag}"
-        st.metric(label=display_label, value=val_str, delta=delta_str)
+        has_value = v.get("value") is not None
+        val_str = f"{v['value']:{fmt}}{unit}" if has_value else "N/A"
+
+        if v.get("change") is not None:
+            chg = v["change"]
+            arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "―")
+            css_class = "metric-delta-up" if chg > 0 else ("metric-delta-down" if chg < 0 else "metric-delta-flat")
+            delta_html = f'<span class="{css_class}">{arrow} {chg:+{fmt}}{unit}</span>'
+        else:
+            delta_html = '<span class="metric-delta-flat">―</span>'
+
+        badge = f'<span class="metric-badge">{v["source"]}</span>' if v.get("source") else ""
+        stale = '<span class="stale-tag"> ⚠ 이전값</span>' if v.get("stale") else ""
+
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">{icon} {label} {badge}{stale}</div>
+            <div class="metric-value">{val_str}</div>
+            {delta_html}
+        </div>
+        """, unsafe_allow_html=True)
 
 
-st.write("---")
-st.subheader("🏦 한·미 핵심 국채 금리 현황")
-b1, b2, b3 = st.columns(3)
-show_metric(b1, "🇰🇷 한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %")
-show_metric(b2, "🇺🇸 미국 국채 2년물", data["미국 국채 2년"], ",.4f", " %")
-show_metric(b3, "🇺🇸 미국 국채 10년물", data["미국 국채 10년"], ",.4f", " %")
+def render_jpy_card(col, v):
+    with col:
+        has_value = v.get("value") is not None
+        val = v["value"] * 100 if has_value else None
+        chg = v["change"] * 100 if v.get("change") is not None else None
+        val_str = f"{val:,.2f} 원" if val is not None else "N/A"
 
-st.write("---")
-st.subheader("📊 국내 및 해외 주요 주가지수")
-c1, c2, c3, c4, c5 = st.columns(5)
-show_metric(c1, "코스피 (KOSPI)", data["KOSPI"], ",.2f")
-show_metric(c2, "코스닥 (KOSDAQ)", data["KOSDAQ"], ",.2f")
-show_metric(c3, "미국 S&P 500", data["S&P 500"], ",.2f")
-show_metric(c4, "미국 나스닥", data["NASDAQ"], ",.2f")
-show_metric(c5, "필라델피아 반도체", data["필라델피아 반도체"], ",.2f")
+        if chg is not None:
+            arrow = "▲" if chg > 0 else ("▼" if chg < 0 else "―")
+            css_class = "metric-delta-up" if chg > 0 else ("metric-delta-down" if chg < 0 else "metric-delta-flat")
+            delta_html = f'<span class="{css_class}">{arrow} {chg:+,.2f} 원</span>'
+        else:
+            delta_html = '<span class="metric-delta-flat">―</span>'
 
-st.write("---")
-st.subheader("💵 주요 환율 및 달러 인덱스")
-h1, h2, h3, h4, h5 = st.columns(5)
-show_metric(h1, "원/달러 환율", data["원달러 환율"], ",.2f", " 원")
+        stale = '<span class="stale-tag"> ⚠ 이전값</span>' if v.get("stale") else ""
 
-v_jpy = data["엔화 환율"]
-with h2:
-    val = v_jpy["value"] * 100 if v_jpy.get("value") is not None else None
-    chg = v_jpy["change"] * 100 if v_jpy.get("change") is not None else None
-    lbl = "원/100엔 환율 ⚠️" if v_jpy.get("stale") else "원/100엔 환율"
-    st.metric(
-        label=lbl,
-        value=f"{val:,.2f} 원" if val is not None else "N/A",
-        delta=f"{chg:+,.2f} 원" if chg is not None else None,
-    )
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">💴 원/100엔 환율{stale}</div>
+            <div class="metric-value">{val_str}</div>
+            {delta_html}
+        </div>
+        """, unsafe_allow_html=True)
 
-show_metric(h3, "원/유로 환율", data["유로 환율"], ",.2f", " 원")
-show_metric(h4, "원/위안화 환율", data["위안화 환율"], ",.2f", " 원")
-show_metric(h5, "달러 인덱스 (DXY)", data["달러 인덱스"], ",.2f")
 
-st.write("---")
-st.subheader("🔥 주요 원자재 및 공포지수")
-e1, e2, e3 = st.columns(3)
-show_metric(e1, "WTI 국제유가", data["유가 (WTI)"], ",.2f", " $")
-show_metric(e2, "국제 금 시세 (oz)", data["국제 금"], ",.2f", " $")
-show_metric(e3, "VIX 공포지수", data["VIX 공포지수"], ",.2f")
+# =========================================================
+# 🗂️ 탭 구성
+# =========================================================
+tab1, tab2, tab3, tab4 = st.tabs(["🏦 국채금리", "📊 주가지수", "💵 환율", "🔥 원자재/공포지수"])
+
+with tab1:
+    b1, b2, b3 = st.columns(3)
+    render_card(b1, "한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %", "🇰🇷")
+    render_card(b2, "미국 국채 2년물", data["미국 국채 2년"], ",.3f", " %", "🇺🇸")
+    render_card(b3, "미국 국채 10년물", data["미국 국채 10년"], ",.3f", " %", "🇺🇸")
+
+with tab2:
+    c1, c2, c3, c4, c5 = st.columns(5)
+    render_card(c1, "코스피", data["KOSPI"], ",.2f", "", "🇰🇷")
+    render_card(c2, "코스닥", data["KOSDAQ"], ",.2f", "", "🇰🇷")
+    render_card(c3, "S&P 500", data["S&P 500"], ",.2f", "", "🇺🇸")
+    render_card(c4, "나스닥", data["NASDAQ"], ",.2f", "", "🇺🇸")
+    render_card(c5, "필라델피아 반도체", data["필라델피아 반도체"], ",.2f", "", "💻")
+
+with tab3:
+    h1, h2, h3, h4, h5 = st.columns(5)
+    render_card(h1, "원/달러 환율", data["원달러 환율"], ",.2f", " 원", "💵")
+    render_jpy_card(h2, data["엔화 환율"])
+    render_card(h3, "원/유로 환율", data["유로 환율"], ",.2f", " 원", "💶")
+    render_card(h4, "원/위안화 환율", data["위안화 환율"], ",.2f", " 원", "💴")
+    render_card(h5, "달러 인덱스", data["달러 인덱스"], ",.2f", "", "📈")
+
+with tab4:
+    e1, e2, e3 = st.columns(3)
+    render_card(e1, "WTI 국제유가", data["유가 (WTI)"], ",.2f", " $", "🛢️")
+    render_card(e2, "국제 금 시세", data["국제 금"], ",.2f", " $", "🥇")
+    render_card(e3, "VIX 공포지수", data["VIX 공포지수"], ",.2f", "", "😨")
 
 st.write("---")
 with st.expander("🔧 진단 정보 (N/A 원인 확인용)"):
-    st.caption("15초 캐시가 적용되어 있어, 새로고침 버튼을 눌러도 방금 값이 그대로 보일 수 있습니다(정상).")
+    st.caption("15초 캐시가 적용되어 있어, 강제 새로고침 직후에도 방금 값이 그대로 보일 수 있습니다(정상).")
     st.json(debug_log)
