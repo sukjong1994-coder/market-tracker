@@ -3,6 +3,8 @@ import datetime as dt
 import requests
 import re
 import concurrent.futures
+import pandas as pd
+import altair as alt
 
 # --- 🛠️ 기본 설정 ---
 KST = dt.timezone(dt.timedelta(hours=9))
@@ -12,17 +14,18 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-FAST_TIMEOUT = 2.5
+FAST_TIMEOUT = 3.5  # 1mo 히스토리 포함으로 페이로드가 늘어나 살짝 여유를 둠
+HISTORY_DAYS = 7
 
 
 # =========================================================
-# 🌐 단일 소스 fetch 함수
+# 🌐 단일 소스 fetch 함수 (이제 history 포함)
 # =========================================================
 def fetch_yahoo(ticker, debug=None, scale=1.0):
     try:
         r = SESSION.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
-            params={"interval": "1d", "range": "2d"},
+            params={"interval": "1d", "range": "1mo"},  # ✅ 히스토리 확보를 위해 range 확장
             timeout=FAST_TIMEOUT,
         )
         if debug is not None:
@@ -41,7 +44,17 @@ def fetch_yahoo(ticker, debug=None, scale=1.0):
             return None
         price *= scale
         change = (price - prev * scale) if prev is not None else None
-        return {"value": price, "change": change}
+
+        # ✅ 같은 응답에서 최근 N일 히스토리 추출 (추가 요청 없음)
+        history = []
+        try:
+            closes = result[0]["indicators"]["quote"][0].get("close", [])
+            valid_closes = [c * scale for c in closes if c is not None]
+            history = valid_closes[-HISTORY_DAYS:]
+        except Exception:
+            history = []
+
+        return {"value": price, "change": change, "history": history}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -77,7 +90,9 @@ def fetch_stooq(symbol, debug=None):
             if debug is not None:
                 debug["error"] = f"유효 종가 부족 (n={len(closes)})"
             return None
-        return {"value": closes[-1], "change": closes[-1] - closes[-2]}
+        # Stooq CSV는 오름차순(과거→최근) 정렬이므로 그대로 슬라이스
+        history = closes[-HISTORY_DAYS:]
+        return {"value": closes[-1], "change": closes[-1] - closes[-2], "history": history}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -107,7 +122,9 @@ def fetch_korea_bond(marketindex_cd, debug=None):
             if debug is not None:
                 debug["error"] = f"파싱된 값 부족 (values={len(values)})"
             return None
-        return {"value": values[0], "change": values[0] - values[1]}
+        # values[0]이 최신값, 뒤로 갈수록 과거 → 스파크라인용으로 역순 정렬(과거→최근)
+        history = list(reversed(values[:HISTORY_DAYS]))
+        return {"value": values[0], "change": values[0] - values[1], "history": history}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -192,7 +209,7 @@ def load_market_data():
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_key = {executor.submit(func): key for key, func in tasks.items()}
-        done, not_done = concurrent.futures.wait(future_to_key.keys(), timeout=8)
+        done, not_done = concurrent.futures.wait(future_to_key.keys(), timeout=10)
         for future in done:
             key = future_to_key[future]
             try:
@@ -204,14 +221,19 @@ def load_market_data():
         for future in not_done:
             key = future_to_key[future]
             results[key] = None
-            debug_refs.setdefault(key, {})["error"] = "8초 타임아웃"
+            debug_refs.setdefault(key, {})["error"] = "10초 타임아웃"
 
     fetched_at = dt.datetime.now(KST).strftime("%H:%M:%S")
     for key in results:
         if results[key] and results[key].get("value") is not None:
-            results[key] = {**results[key], "stale": False, "cached_at": fetched_at}
+            results[key] = {
+                "history": [],
+                **results[key],
+                "stale": False,
+                "cached_at": fetched_at,
+            }
         else:
-            results[key] = {"value": None, "change": None, "stale": True, "cached_at": "N/A"}
+            results[key] = {"value": None, "change": None, "history": [], "stale": True, "cached_at": "N/A"}
 
     return results, debug_refs
 
@@ -225,14 +247,10 @@ st.markdown("""
 <style>
     .metric-card {
         border: 1px solid #E5E7EB;
-        border-radius: 12px;
-        padding: 16px 18px;
+        border-radius: 12px 12px 0 0;
+        padding: 16px 18px 10px 18px;
         background-color: #FFFFFF;
-        margin-bottom: 10px;
-        transition: box-shadow 0.2s;
-    }
-    .metric-card:hover {
-        box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+        border-bottom: none;
     }
     .metric-label {
         font-size: 13px;
@@ -257,32 +275,25 @@ st.markdown("""
         color: #111827;
         line-height: 1.3;
     }
-    .metric-delta-up {
-        font-size: 14px;
-        font-weight: 600;
-        color: #DC2626;
+    .metric-delta-up { font-size: 14px; font-weight: 600; color: #DC2626; }
+    .metric-delta-down { font-size: 14px; font-weight: 600; color: #2563EB; }
+    .metric-delta-flat { font-size: 14px; font-weight: 600; color: #9CA3AF; }
+    .stale-tag { font-size: 11px; color: #F59E0B; font-weight: 600; }
+    .section-title { font-size: 18px; font-weight: 700; margin-top: 4px; margin-bottom: 12px; }
+    .sparkline-wrap {
+        border: 1px solid #E5E7EB;
+        border-top: none;
+        border-radius: 0 0 12px 12px;
+        padding: 0 10px 4px 10px;
+        margin-bottom: 10px;
+        background-color: #FFFFFF;
     }
-    .metric-delta-down {
-        font-size: 14px;
-        font-weight: 600;
-        color: #2563EB;
+    .sparkline-caption {
+        font-size: 10px;
+        color: #D1D5DB;
+        margin: 2px 0 0 4px;
     }
-    .metric-delta-flat {
-        font-size: 14px;
-        font-weight: 600;
-        color: #9CA3AF;
-    }
-    .stale-tag {
-        font-size: 11px;
-        color: #F59E0B;
-        font-weight: 600;
-    }
-    .section-title {
-        font-size: 18px;
-        font-weight: 700;
-        margin-top: 4px;
-        margin-bottom: 12px;
-    }
+    div[data-testid="stVegaLiteChart"] { margin-top: -10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -297,6 +308,37 @@ with top_r:
 
 with st.spinner("⚡ 지표 동기화 중..."):
     data, debug_log = load_market_data()
+
+
+# =========================================================
+# 🧩 스파크라인 생성 함수
+# =========================================================
+def build_sparkline(history):
+    if not history or len(history) < 2:
+        return None
+    if history[-1] > history[0]:
+        color = "#DC2626"
+    elif history[-1] < history[0]:
+        color = "#2563EB"
+    else:
+        color = "#9CA3AF"
+
+    df = pd.DataFrame({"idx": range(len(history)), "value": history})
+    y_min, y_max = min(history), max(history)
+    pad = (y_max - y_min) * 0.15 if y_max != y_min else (abs(y_max) * 0.01 or 1)
+
+    chart = (
+        alt.Chart(df)
+        .mark_line(strokeWidth=2.2)
+        .encode(
+            x=alt.X("idx:Q", axis=None),
+            y=alt.Y("value:Q", axis=None, scale=alt.Scale(domain=[y_min - pad, y_max + pad])),
+            color=alt.value(color),
+        )
+        .properties(height=42)
+        .configure_view(strokeWidth=0)
+    )
+    return chart
 
 
 # =========================================================
@@ -326,6 +368,14 @@ def render_card(col, label, v, fmt, unit="", icon="📌"):
         </div>
         """, unsafe_allow_html=True)
 
+        chart = build_sparkline(v.get("history"))
+        st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
+        if chart is not None:
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.markdown('<div class="sparkline-caption">추이 데이터 없음</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
 
 def render_jpy_card(col, v):
     with col:
@@ -350,6 +400,15 @@ def render_jpy_card(col, v):
             {delta_html}
         </div>
         """, unsafe_allow_html=True)
+
+        history_scaled = [h * 100 for h in (v.get("history") or [])]
+        chart = build_sparkline(history_scaled)
+        st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
+        if chart is not None:
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.markdown('<div class="sparkline-caption">추이 데이터 없음</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 # =========================================================
