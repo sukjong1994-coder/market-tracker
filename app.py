@@ -45,7 +45,6 @@ def fetch_yahoo(ticker, debug=None, scale=1.0):
         price *= scale
         change = (price - prev * scale) if prev is not None else None
 
-        # ✅ 날짜 + 종가 페어로 히스토리 구성 (툴팁용 날짜 포함)
         history = []
         try:
             timestamps = result[0].get("timestamp", [])
@@ -117,7 +116,7 @@ def fetch_stooq(symbol, debug=None):
 
 def fetch_korea_bond(marketindex_cd, debug=None):
     try:
-        pairs = []  # (date_str, value), 최신순
+        pairs = []
         page = 1
         max_page = 6
         while len(pairs) < HISTORY_DAYS + 1 and page <= max_page:
@@ -156,7 +155,6 @@ def fetch_korea_bond(marketindex_cd, debug=None):
         change = values_only[0] - values_only[1]
         latest_value = values_only[0]
 
-        # 과거 → 최근 순으로 정렬, 날짜 포맷 통일(YYYY-MM-DD)
         history_pairs = list(reversed(pairs[:HISTORY_DAYS]))
         history = [{"date": d.replace(".", "-"), "value": v} for d, v in history_pairs]
 
@@ -314,6 +312,9 @@ st.markdown("""
     .metric-delta-up { font-size: 14px; font-weight: 600; color: #DC2626; }
     .metric-delta-down { font-size: 14px; font-weight: 600; color: #2563EB; }
     .metric-delta-flat { font-size: 14px; font-weight: 600; color: #9CA3AF; }
+    .metric-delta30-up { font-size: 11px; font-weight: 600; color: #DC2626; margin-top: 2px; }
+    .metric-delta30-down { font-size: 11px; font-weight: 600; color: #2563EB; margin-top: 2px; }
+    .metric-delta30-flat { font-size: 11px; font-weight: 600; color: #9CA3AF; margin-top: 2px; }
     .stale-tag { font-size: 11px; color: #F59E0B; font-weight: 600; }
     .section-title { font-size: 18px; font-weight: 700; margin-top: 4px; margin-bottom: 12px; }
     .sparkline-wrap {
@@ -339,7 +340,7 @@ top_l, top_r = st.columns([3, 1])
 with top_l:
     st.caption(
         f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  "
-        "🔴 상승 / 🔵 하락  ·  📉 최근 30거래일 추이 (그래프에 마우스를 올리면 날짜·값 확인 가능)"
+        "🔴 상승 / 🔵 하락  ·  📉 최근 30거래일 추이 (마우스 호버 시 날짜·값 확인 가능)"
     )
 with top_r:
     if st.button("🔄 강제 새로고침", use_container_width=True):
@@ -350,9 +351,31 @@ with st.spinner("⚡ 지표 동기화 중..."):
 
 
 # =========================================================
-# 🧩 스파크라인 생성 함수 (등락 강조 + 툴팁)
+# 🧩 30일 대비 등락 계산
 # =========================================================
-def build_sparkline(history, value_fmt=",.2f", unit=""):
+def compute_30d_change(history, fmt, unit):
+    if not history or len(history) < 2:
+        return ""
+    first_val = history[0]["value"]
+    last_val = history[-1]["value"]
+    diff = last_val - first_val
+    pct = (diff / first_val * 100) if first_val not in (0, None) else None
+
+    if diff > 0:
+        arrow, css = "▲", "metric-delta30-up"
+    elif diff < 0:
+        arrow, css = "▼", "metric-delta30-down"
+    else:
+        arrow, css = "―", "metric-delta30-flat"
+
+    pct_str = f" ({pct:+.2f}%)" if pct is not None else ""
+    return f'<div class="{css}">30일 대비 {arrow} {diff:+{fmt}}{unit}{pct_str}</div>'
+
+
+# =========================================================
+# 🧩 스파크라인 생성 함수 (등락 강조 + 툴팁 + 지표별 pad 비율)
+# =========================================================
+def build_sparkline(history, value_fmt=",.2f", unit="", pad_ratio=0.05):
     if not history or len(history) < 2:
         return None
 
@@ -368,8 +391,8 @@ def build_sparkline(history, value_fmt=",.2f", unit=""):
 
     y_min, y_max = min(values), max(values)
     rng = y_max - y_min
-    # ✅ 여백을 좁혀서(10%) 실제 등락이 최대한 뚜렷하게 보이도록 스케일링
-    pad = rng * 0.10 if rng > 0 else (abs(y_max) * 0.005 or 0.01)
+    # ✅ pad_ratio를 지표별로 다르게 받아 더 극적으로(값이 클수록 완만, 작을수록 타이트) 조정
+    pad = rng * pad_ratio if rng > 0 else (abs(y_max) * 0.005 or 0.01)
 
     df = pd.DataFrame({
         "idx": range(len(values)),
@@ -382,7 +405,7 @@ def build_sparkline(history, value_fmt=",.2f", unit=""):
         alt.Chart(df)
         .mark_line(
             strokeWidth=2.0,
-            point=alt.OverlayMarkDef(filled=True, size=18, opacity=0),  # 투명 포인트로 호버 감지
+            point=alt.OverlayMarkDef(filled=True, size=18, opacity=0),
         )
         .encode(
             x=alt.X("idx:Q", axis=None),
@@ -402,7 +425,7 @@ def build_sparkline(history, value_fmt=",.2f", unit=""):
 # =========================================================
 # 🧩 카드 렌더링 함수
 # =========================================================
-def render_card(col, label, v, fmt, unit="", icon="📌"):
+def render_card(col, label, v, fmt, unit="", icon="📌", pad_ratio=0.05):
     with col:
         has_value = v.get("value") is not None
         val_str = f"{v['value']:{fmt}}{unit}" if has_value else "N/A"
@@ -418,16 +441,19 @@ def render_card(col, label, v, fmt, unit="", icon="📌"):
         badge = f'<span class="metric-badge">{v["source"]}</span>' if v.get("source") else ""
         stale = '<span class="stale-tag"> ⚠ 이전값</span>' if v.get("stale") else ""
 
+        history = v.get("history")
+        change30_html = compute_30d_change(history, fmt, unit)
+
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">{icon} {label} {badge}{stale}</div>
             <div class="metric-value">{val_str}</div>
             {delta_html}
+            {change30_html}
         </div>
         """, unsafe_allow_html=True)
 
-        history = v.get("history")
-        chart = build_sparkline(history, value_fmt=fmt, unit=unit)
+        chart = build_sparkline(history, value_fmt=fmt, unit=unit, pad_ratio=pad_ratio)
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
@@ -437,7 +463,7 @@ def render_card(col, label, v, fmt, unit="", icon="📌"):
         st.markdown('</div>', unsafe_allow_html=True)
 
 
-def render_jpy_card(col, v):
+def render_jpy_card(col, v, pad_ratio=0.05):
     with col:
         has_value = v.get("value") is not None
         val = v["value"] * 100 if has_value else None
@@ -453,17 +479,20 @@ def render_jpy_card(col, v):
 
         stale = '<span class="stale-tag"> ⚠ 이전값</span>' if v.get("stale") else ""
 
+        raw_history = v.get("history") or []
+        history_scaled = [{"date": h["date"], "value": h["value"] * 100} for h in raw_history]
+        change30_html = compute_30d_change(history_scaled, ",.2f", " 원")
+
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">💴 원/100엔 환율{stale}</div>
             <div class="metric-value">{val_str}</div>
             {delta_html}
+            {change30_html}
         </div>
         """, unsafe_allow_html=True)
 
-        raw_history = v.get("history") or []
-        history_scaled = [{"date": h["date"], "value": h["value"] * 100} for h in raw_history]
-        chart = build_sparkline(history_scaled, value_fmt=",.2f", unit=" 원")
+        chart = build_sparkline(history_scaled, value_fmt=",.2f", unit=" 원", pad_ratio=pad_ratio)
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
@@ -477,12 +506,12 @@ def render_jpy_card(col, v):
 # 📄 한 페이지에 모든 섹션 표시
 # =========================================================
 
-# --- 국채금리 ---
+# --- 국채금리 (소수점 단위 변화가 중요 → pad_ratio를 더 타이트하게 0.02) ---
 st.markdown('<div class="section-title">🏦 한·미 핵심 국채 금리 현황</div>', unsafe_allow_html=True)
 b1, b2, b3 = st.columns(3)
-render_card(b1, "한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %", "🇰🇷")
-render_card(b2, "미국 국채 2년물", data["미국 국채 2년"], ",.3f", " %", "🇺🇸")
-render_card(b3, "미국 국채 10년물", data["미국 국채 10년"], ",.3f", " %", "🇺🇸")
+render_card(b1, "한국 국채 3년물", data["한국 국채 3년"], ",.3f", " %", "🇰🇷", pad_ratio=0.02)
+render_card(b2, "미국 국채 2년물", data["미국 국채 2년"], ",.3f", " %", "🇺🇸", pad_ratio=0.02)
+render_card(b3, "미국 국채 10년물", data["미국 국채 10년"], ",.3f", " %", "🇺🇸", pad_ratio=0.02)
 
 st.write("---")
 
