@@ -14,18 +14,18 @@ HEADERS = {
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-FAST_TIMEOUT = 3.5  # 1mo 히스토리 포함으로 페이로드가 늘어나 살짝 여유를 둠
-HISTORY_DAYS = 7
+FAST_TIMEOUT = 4.0
+HISTORY_DAYS = 30  # ✅ 7일 → 30일(약 한 달) 추이로 확장
 
 
 # =========================================================
-# 🌐 단일 소스 fetch 함수 (이제 history 포함)
+# 🌐 단일 소스 fetch 함수 (history 포함)
 # =========================================================
 def fetch_yahoo(ticker, debug=None, scale=1.0):
     try:
         r = SESSION.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
-            params={"interval": "1d", "range": "1mo"},  # ✅ 히스토리 확보를 위해 range 확장
+            params={"interval": "1d", "range": "3mo"},  # ✅ 30거래일 확보를 위해 3mo로 확장
             timeout=FAST_TIMEOUT,
         )
         if debug is not None:
@@ -45,7 +45,6 @@ def fetch_yahoo(ticker, debug=None, scale=1.0):
         price *= scale
         change = (price - prev * scale) if prev is not None else None
 
-        # ✅ 같은 응답에서 최근 N일 히스토리 추출 (추가 요청 없음)
         history = []
         try:
             closes = result[0]["indicators"]["quote"][0].get("close", [])
@@ -90,7 +89,7 @@ def fetch_stooq(symbol, debug=None):
             if debug is not None:
                 debug["error"] = f"유효 종가 부족 (n={len(closes)})"
             return None
-        # Stooq CSV는 오름차순(과거→최근) 정렬이므로 그대로 슬라이스
+        # Stooq CSV는 과거→최근 오름차순이므로 그대로 슬라이스
         history = closes[-HISTORY_DAYS:]
         return {"value": closes[-1], "change": closes[-1] - closes[-2], "history": history}
     except Exception as e:
@@ -101,28 +100,40 @@ def fetch_stooq(symbol, debug=None):
 
 def fetch_korea_bond(marketindex_cd, debug=None):
     try:
-        r = SESSION.get(
-            "https://finance.naver.com/marketindex/interestDailyQuote.naver",
-            params={"marketindexCd": marketindex_cd, "page": 1},
-            headers={**HEADERS, "Referer": "https://finance.naver.com/marketindex/"},
-            timeout=FAST_TIMEOUT,
-        )
-        if debug is not None:
-            debug["status_code"] = r.status_code
-        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S)
         values = []
-        for row in rows:
-            nums = re.findall(r'<td[^>]*class="num"[^>]*>\s*([\d,.\-]+)\s*</td>', row)
-            if nums:
-                try:
-                    values.append(float(nums[0].replace(",", "")))
-                except ValueError:
-                    continue
+        page = 1
+        max_page = 6  # ✅ 여유있게 최대 6페이지까지 순회하며 30일치 확보
+        while len(values) < HISTORY_DAYS + 1 and page <= max_page:
+            r = SESSION.get(
+                "https://finance.naver.com/marketindex/interestDailyQuote.naver",
+                params={"marketindexCd": marketindex_cd, "page": page},
+                headers={**HEADERS, "Referer": "https://finance.naver.com/marketindex/"},
+                timeout=FAST_TIMEOUT,
+            )
+            if debug is not None:
+                debug[f"status_code_p{page}"] = r.status_code
+
+            rows = re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S)
+            page_values = []
+            for row in rows:
+                nums = re.findall(r'<td[^>]*class="num"[^>]*>\s*([\d,.\-]+)\s*</td>', row)
+                if nums:
+                    try:
+                        page_values.append(float(nums[0].replace(",", "")))
+                    except ValueError:
+                        continue
+
+            if not page_values:
+                break  # 더 이상 데이터가 없으면 페이지네이션 중단
+            values.extend(page_values)
+            page += 1
+
         if len(values) < 2:
             if debug is not None:
                 debug["error"] = f"파싱된 값 부족 (values={len(values)})"
             return None
-        # values[0]이 최신값, 뒤로 갈수록 과거 → 스파크라인용으로 역순 정렬(과거→최근)
+
+        # values[0]이 최신, 뒤로 갈수록 과거 → 차트용으로 역순(과거→최근) 정렬
         history = list(reversed(values[:HISTORY_DAYS]))
         return {"value": values[0], "change": values[0] - values[1], "history": history}
     except Exception as e:
@@ -209,7 +220,7 @@ def load_market_data():
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_key = {executor.submit(func): key for key, func in tasks.items()}
-        done, not_done = concurrent.futures.wait(future_to_key.keys(), timeout=10)
+        done, not_done = concurrent.futures.wait(future_to_key.keys(), timeout=12)
         for future in done:
             key = future_to_key[future]
             try:
@@ -221,7 +232,7 @@ def load_market_data():
         for future in not_done:
             key = future_to_key[future]
             results[key] = None
-            debug_refs.setdefault(key, {})["error"] = "10초 타임아웃"
+            debug_refs.setdefault(key, {})["error"] = "12초 타임아웃"
 
     fetched_at = dt.datetime.now(KST).strftime("%H:%M:%S")
     for key in results:
@@ -301,7 +312,7 @@ st.title("📈 글로벌 시장 지표 대시보드")
 
 top_l, top_r = st.columns([3, 1])
 with top_l:
-    st.caption(f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  🔴 상승 / 🔵 하락 (한국 시장 관행 기준)")
+    st.caption(f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  🔴 상승 / 🔵 하락 (한국 시장 관행 기준)  ·  📉 최근 30거래일 추이")
 with top_r:
     if st.button("🔄 강제 새로고침", use_container_width=True):
         load_market_data.clear()
@@ -329,7 +340,7 @@ def build_sparkline(history):
 
     chart = (
         alt.Chart(df)
-        .mark_line(strokeWidth=2.2)
+        .mark_line(strokeWidth=2.0)
         .encode(
             x=alt.X("idx:Q", axis=None),
             y=alt.Y("value:Q", axis=None, scale=alt.Scale(domain=[y_min - pad, y_max + pad])),
@@ -372,6 +383,8 @@ def render_card(col, label, v, fmt, unit="", icon="📌"):
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
+            n = len(v.get("history"))
+            st.markdown(f'<div class="sparkline-caption">최근 {n}거래일</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="sparkline-caption">추이 데이터 없음</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -406,6 +419,7 @@ def render_jpy_card(col, v):
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
+            st.markdown(f'<div class="sparkline-caption">최근 {len(history_scaled)}거래일</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="sparkline-caption">추이 데이터 없음</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
