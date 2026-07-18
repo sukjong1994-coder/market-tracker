@@ -15,17 +15,17 @@ SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
 FAST_TIMEOUT = 4.0
-HISTORY_DAYS = 30  # ✅ 7일 → 30일(약 한 달) 추이로 확장
+HISTORY_DAYS = 30
 
 
 # =========================================================
-# 🌐 단일 소스 fetch 함수 (history 포함)
+# 🌐 단일 소스 fetch 함수 (날짜 + 값 페어로 history 구성)
 # =========================================================
 def fetch_yahoo(ticker, debug=None, scale=1.0):
     try:
         r = SESSION.get(
             f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}",
-            params={"interval": "1d", "range": "3mo"},  # ✅ 30거래일 확보를 위해 3mo로 확장
+            params={"interval": "1d", "range": "3mo"},
             timeout=FAST_TIMEOUT,
         )
         if debug is not None:
@@ -45,11 +45,20 @@ def fetch_yahoo(ticker, debug=None, scale=1.0):
         price *= scale
         change = (price - prev * scale) if prev is not None else None
 
+        # ✅ 날짜 + 종가 페어로 히스토리 구성 (툴팁용 날짜 포함)
         history = []
         try:
+            timestamps = result[0].get("timestamp", [])
             closes = result[0]["indicators"]["quote"][0].get("close", [])
-            valid_closes = [c * scale for c in closes if c is not None]
-            history = valid_closes[-HISTORY_DAYS:]
+            paired = [(ts, c) for ts, c in zip(timestamps, closes) if c is not None]
+            paired = paired[-HISTORY_DAYS:]
+            history = [
+                {
+                    "date": dt.datetime.fromtimestamp(ts, tz=KST).strftime("%Y-%m-%d"),
+                    "value": c * scale,
+                }
+                for ts, c in paired
+            ]
         except Exception:
             history = []
 
@@ -76,22 +85,30 @@ def fetch_stooq(symbol, debug=None):
                 debug["error"] = "데이터 라인 부족"
             return None
         header = lines[0].split(",")
+        date_idx = header.index("Date") if "Date" in header else 0
         close_idx = header.index("Close") if "Close" in header else 4
-        closes = []
+
+        rows_parsed = []
         for line in lines[1:]:
             parts = line.split(",")
             if len(parts) > close_idx:
                 try:
-                    closes.append(float(parts[close_idx]))
+                    date_str = parts[date_idx]
+                    close_val = float(parts[close_idx])
+                    rows_parsed.append((date_str, close_val))
                 except ValueError:
                     continue
-        if len(closes) < 2:
+
+        if len(rows_parsed) < 2:
             if debug is not None:
-                debug["error"] = f"유효 종가 부족 (n={len(closes)})"
+                debug["error"] = f"유효 종가 부족 (n={len(rows_parsed)})"
             return None
-        # Stooq CSV는 과거→최근 오름차순이므로 그대로 슬라이스
-        history = closes[-HISTORY_DAYS:]
-        return {"value": closes[-1], "change": closes[-1] - closes[-2], "history": history}
+
+        history_pairs = rows_parsed[-HISTORY_DAYS:]
+        history = [{"date": d, "value": c} for d, c in history_pairs]
+        last_val = rows_parsed[-1][1]
+        prev_val = rows_parsed[-2][1]
+        return {"value": last_val, "change": last_val - prev_val, "history": history}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -100,10 +117,10 @@ def fetch_stooq(symbol, debug=None):
 
 def fetch_korea_bond(marketindex_cd, debug=None):
     try:
-        values = []
+        pairs = []  # (date_str, value), 최신순
         page = 1
-        max_page = 6  # ✅ 여유있게 최대 6페이지까지 순회하며 30일치 확보
-        while len(values) < HISTORY_DAYS + 1 and page <= max_page:
+        max_page = 6
+        while len(pairs) < HISTORY_DAYS + 1 and page <= max_page:
             r = SESSION.get(
                 "https://finance.naver.com/marketindex/interestDailyQuote.naver",
                 params={"marketindexCd": marketindex_cd, "page": page},
@@ -114,28 +131,36 @@ def fetch_korea_bond(marketindex_cd, debug=None):
                 debug[f"status_code_p{page}"] = r.status_code
 
             rows = re.findall(r"<tr[^>]*>(.*?)</tr>", r.text, re.S)
-            page_values = []
+            page_pairs = []
             for row in rows:
+                date_match = re.search(r"(\d{4}\.\d{2}\.\d{2})", row)
                 nums = re.findall(r'<td[^>]*class="num"[^>]*>\s*([\d,.\-]+)\s*</td>', row)
-                if nums:
+                if date_match and nums:
                     try:
-                        page_values.append(float(nums[0].replace(",", "")))
+                        val = float(nums[0].replace(",", ""))
+                        page_pairs.append((date_match.group(1), val))
                     except ValueError:
                         continue
 
-            if not page_values:
-                break  # 더 이상 데이터가 없으면 페이지네이션 중단
-            values.extend(page_values)
+            if not page_pairs:
+                break
+            pairs.extend(page_pairs)
             page += 1
 
-        if len(values) < 2:
+        if len(pairs) < 2:
             if debug is not None:
-                debug["error"] = f"파싱된 값 부족 (values={len(values)})"
+                debug["error"] = f"파싱된 값 부족 (values={len(pairs)})"
             return None
 
-        # values[0]이 최신, 뒤로 갈수록 과거 → 차트용으로 역순(과거→최근) 정렬
-        history = list(reversed(values[:HISTORY_DAYS]))
-        return {"value": values[0], "change": values[0] - values[1], "history": history}
+        values_only = [p[1] for p in pairs]
+        change = values_only[0] - values_only[1]
+        latest_value = values_only[0]
+
+        # 과거 → 최근 순으로 정렬, 날짜 포맷 통일(YYYY-MM-DD)
+        history_pairs = list(reversed(pairs[:HISTORY_DAYS]))
+        history = [{"date": d.replace(".", "-"), "value": v} for d, v in history_pairs]
+
+        return {"value": latest_value, "change": change, "history": history}
     except Exception as e:
         if debug is not None:
             debug["error"] = f"{type(e).__name__}: {e}"
@@ -312,7 +337,10 @@ st.title("📈 글로벌 시장 지표 대시보드")
 
 top_l, top_r = st.columns([3, 1])
 with top_l:
-    st.caption(f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  🔴 상승 / 🔵 하락 (한국 시장 관행 기준)  ·  📉 최근 30거래일 추이")
+    st.caption(
+        f"조회 시각 (KST): {dt.datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}  ·  "
+        "🔴 상승 / 🔵 하락  ·  📉 최근 30거래일 추이 (그래프에 마우스를 올리면 날짜·값 확인 가능)"
+    )
 with top_r:
     if st.button("🔄 강제 새로고침", use_container_width=True):
         load_market_data.clear()
@@ -322,31 +350,50 @@ with st.spinner("⚡ 지표 동기화 중..."):
 
 
 # =========================================================
-# 🧩 스파크라인 생성 함수
+# 🧩 스파크라인 생성 함수 (등락 강조 + 툴팁)
 # =========================================================
-def build_sparkline(history):
+def build_sparkline(history, value_fmt=",.2f", unit=""):
     if not history or len(history) < 2:
         return None
-    if history[-1] > history[0]:
+
+    values = [h["value"] for h in history]
+    dates = [h["date"] for h in history]
+
+    if values[-1] > values[0]:
         color = "#DC2626"
-    elif history[-1] < history[0]:
+    elif values[-1] < values[0]:
         color = "#2563EB"
     else:
         color = "#9CA3AF"
 
-    df = pd.DataFrame({"idx": range(len(history)), "value": history})
-    y_min, y_max = min(history), max(history)
-    pad = (y_max - y_min) * 0.15 if y_max != y_min else (abs(y_max) * 0.01 or 1)
+    y_min, y_max = min(values), max(values)
+    rng = y_max - y_min
+    # ✅ 여백을 좁혀서(10%) 실제 등락이 최대한 뚜렷하게 보이도록 스케일링
+    pad = rng * 0.10 if rng > 0 else (abs(y_max) * 0.005 or 0.01)
+
+    df = pd.DataFrame({
+        "idx": range(len(values)),
+        "date": dates,
+        "value": values,
+        "label": [f"{v:{value_fmt}}{unit}" for v in values],
+    })
 
     chart = (
         alt.Chart(df)
-        .mark_line(strokeWidth=2.0)
+        .mark_line(
+            strokeWidth=2.0,
+            point=alt.OverlayMarkDef(filled=True, size=18, opacity=0),  # 투명 포인트로 호버 감지
+        )
         .encode(
             x=alt.X("idx:Q", axis=None),
             y=alt.Y("value:Q", axis=None, scale=alt.Scale(domain=[y_min - pad, y_max + pad])),
             color=alt.value(color),
+            tooltip=[
+                alt.Tooltip("date:N", title="날짜"),
+                alt.Tooltip("label:N", title="값"),
+            ],
         )
-        .properties(height=42)
+        .properties(height=60)
         .configure_view(strokeWidth=0)
     )
     return chart
@@ -379,12 +426,12 @@ def render_card(col, label, v, fmt, unit="", icon="📌"):
         </div>
         """, unsafe_allow_html=True)
 
-        chart = build_sparkline(v.get("history"))
+        history = v.get("history")
+        chart = build_sparkline(history, value_fmt=fmt, unit=unit)
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
-            n = len(v.get("history"))
-            st.markdown(f'<div class="sparkline-caption">최근 {n}거래일</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="sparkline-caption">최근 {len(history)}거래일</div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="sparkline-caption">추이 데이터 없음</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -414,8 +461,9 @@ def render_jpy_card(col, v):
         </div>
         """, unsafe_allow_html=True)
 
-        history_scaled = [h * 100 for h in (v.get("history") or [])]
-        chart = build_sparkline(history_scaled)
+        raw_history = v.get("history") or []
+        history_scaled = [{"date": h["date"], "value": h["value"] * 100} for h in raw_history]
+        chart = build_sparkline(history_scaled, value_fmt=",.2f", unit=" 원")
         st.markdown('<div class="sparkline-wrap">', unsafe_allow_html=True)
         if chart is not None:
             st.altair_chart(chart, use_container_width=True)
